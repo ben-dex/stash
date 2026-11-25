@@ -48,10 +48,13 @@ evaluator_gnb = MulticlassClassificationEvaluator(
 acc_gnb = evaluator_gnb.evaluate(pred_gnb)
 
 # 6. Train & Evaluate Bernoulli Naive Bayes (Binary Features)
+# 6. Train & Evaluate Bernoulli Naive Bayes (Binary Features)
 bnb = NaiveBayes(
     featuresCol="bernoulli_features",
     labelCol="label",
     predictionCol="pred_bernoulli",
+    rawPredictionCol="rawPred_bernoulli",
+    probabilityCol="prob_bernoulli",
     modelType="bernoulli",
 )
 bnb_model = bnb.fit(binary_df)
@@ -70,6 +73,16 @@ pred_bnb.select(
     "pred_gaussian",
     "pred_bernoulli",
 ).show(truncate=False)
+
+print(f"Gaussian Naive Bayes Accuracy:  {acc_gnb:.4f}")
+print(f"Bernoulli Naive Bayes Accuracy: {acc_bnb:.4f}")
+bnb_model = bnb.fit(binary_df)
+pred_bnb = bnb_model.transform(pred_gnb)
+
+evaluator_bnb = MulticlassClassificationEvaluator(
+    labelCol="label", predictionCol="pred_bernoulli", metricName="accuracy"
+)
+acc_bnb = evaluator_bnb.evaluate(pred_bnb)
 
 print(f"Gaussian Naive Bayes Accuracy:  {acc_gnb:.4f}")
 print(f"Bernoulli Naive Bayes Accuracy: {acc_bnb:.4f}")
