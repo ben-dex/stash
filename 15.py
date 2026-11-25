@@ -8,8 +8,8 @@ spark = SparkSession.builder.appName(
     "Exercise15_Gaussian_vs_Bernoulli_NB"
 ).getOrCreate()
 
-# 2. Create dummy image dataset (e.g., 4 pixel values representing continuous grayscale image intensity)
-# Class 0.0: Digits with high top-left values | Class 1.0: Digits with high bottom-right values
+# 2. Create dummy image dataset (4 pixel values representing grayscale image intensity)
+# Class 0.0: High top-left intensity | Class 1.0: High bottom-right intensity
 dummy_image_data = [
     (0.9, 0.8, 0.1, 0.2, 0.0),
     (0.85, 0.95, 0.05, 0.1, 0.0),
@@ -26,7 +26,7 @@ pixel_cols = ["pixel1", "pixel2", "pixel3", "pixel4"]
 assembler = VectorAssembler(inputCols=pixel_cols, outputCol="gaussian_features")
 continuous_df = assembler.transform(df)
 
-# 4. Binarize pixels (0 or 1 thresholding) for Bernoulli NB (which expects binary/boolean features)
+# 4. Binarize pixels (0.0 or 1.0) for Bernoulli NB
 binarizer = Binarizer(
     threshold=0.5, inputCol="gaussian_features", outputCol="bernoulli_features"
 )
@@ -37,6 +37,8 @@ gnb = NaiveBayes(
     featuresCol="gaussian_features",
     labelCol="label",
     predictionCol="pred_gaussian",
+    rawPredictionCol="rawPred_gaussian",
+    probabilityCol="prob_gaussian",
     modelType="gaussian",
 )
 gnb_model = gnb.fit(binary_df)
@@ -48,7 +50,6 @@ evaluator_gnb = MulticlassClassificationEvaluator(
 acc_gnb = evaluator_gnb.evaluate(pred_gnb)
 
 # 6. Train & Evaluate Bernoulli Naive Bayes (Binary Features)
-# 6. Train & Evaluate Bernoulli Naive Bayes (Binary Features)
 bnb = NaiveBayes(
     featuresCol="bernoulli_features",
     labelCol="label",
@@ -58,31 +59,21 @@ bnb = NaiveBayes(
     modelType="bernoulli",
 )
 bnb_model = bnb.fit(binary_df)
-pred_bnb = bnb_model.transform(pred_gnb)
+pred_all = bnb_model.transform(pred_gnb)
 
 evaluator_bnb = MulticlassClassificationEvaluator(
     labelCol="label", predictionCol="pred_bernoulli", metricName="accuracy"
 )
-acc_bnb = evaluator_bnb.evaluate(pred_bnb)
+acc_bnb = evaluator_bnb.evaluate(pred_all)
 
 # 7. Compare Predictions and Accuracy Scores
-pred_bnb.select(
+pred_all.select(
     "gaussian_features",
     "bernoulli_features",
     "label",
     "pred_gaussian",
     "pred_bernoulli",
 ).show(truncate=False)
-
-print(f"Gaussian Naive Bayes Accuracy:  {acc_gnb:.4f}")
-print(f"Bernoulli Naive Bayes Accuracy: {acc_bnb:.4f}")
-bnb_model = bnb.fit(binary_df)
-pred_bnb = bnb_model.transform(pred_gnb)
-
-evaluator_bnb = MulticlassClassificationEvaluator(
-    labelCol="label", predictionCol="pred_bernoulli", metricName="accuracy"
-)
-acc_bnb = evaluator_bnb.evaluate(pred_bnb)
 
 print(f"Gaussian Naive Bayes Accuracy:  {acc_gnb:.4f}")
 print(f"Bernoulli Naive Bayes Accuracy: {acc_bnb:.4f}")
