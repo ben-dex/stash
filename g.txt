@@ -1,0 +1,543 @@
+curl -fL https://github.com/Abishekbabu54/bigd/archive/refs/heads/main.zip -o bigd.zip
+
+start-dfs.sh
+start-yarn.sh
+jps
+
+hdfs dfs -mkdir -p /input
+hdfs dfs -put input.txt /input/
+hdfs dfs -ls /input
+
+javac -classpath "$(hadoop classpath)" -d classes Program.java
+jar -cvf program.jar -C classes .
+
+hadoop jar program.jar Program /input /output
+
+hdfs dfs -cat /output/part-r-*
+hdfs dfs -rm -r /output
+
+stop-yarn.sh
+stop-dfs.sh
+
+
+BIG DATA LAB — HADOOP MAPREDUCE (MAC M4 / ZSH)
+Questions 2, 3 and 4
+
+COMMON SETUP (run once)
+-----------------------
+Assumes Hadoop and a compatible JDK are installed and configured.
+Uses local Hadoop mode, so no HDFS or YARN daemons are needed.
+
+java -version
+hadoop version
+mkdir -p ~/bigdata-lab
+cd ~/bigdata-lab
+
+QUESTION 2 — WORD COUNT (BUILT-IN HADOOP EXAMPLE)
+------------------------------------------------
+hadoop jar "$HADOOP_HOME"/share/hadoop/mapreduce/hadoop-mapreduce-examples-*.jar wordcount /wordcount/input /wordcount/output
+
+mkdir -p q2/input
+cd ~/bigdata-lab/q2
+printf 'hello hadoop hello\nhello spark hadoop\n' > input/words.txt
+
+# Locate the bundled examples JAR (Homebrew or manual installation).
+# If HADOOP_HOME is unset, try Homebrew's Hadoop directory.
+HADOOP_ROOT="${HADOOP_HOME:-$(brew --prefix hadoop)/libexec}"
+EXAMPLES_JAR=$(find "$HADOOP_ROOT" -name 'hadoop-mapreduce-examples-*.jar' | head -n 1)
+echo "$EXAMPLES_JAR"
+
+# Remove previous output only if rerunning this exercise.
+rm -rf output
+hadoop jar "$EXAMPLES_JAR" wordcount -Dfs.defaultFS=file:/// -Dmapreduce.framework.name=local input output
+cat output/part-r-*
+
+Expected output:
+hadoop  2
+hello   3
+spark   1
+
+QUESTION 3 — MATRIX MULTIPLICATION
+----------------------------------
+cd ~/bigdata-lab
+mkdir -p q3/input
+cd q3
+
+# Input format: matrix,row,column,value (zero-based indices).
+# A = [[1,2],[3,4]], B = [[5,6],[7,8]]
+cat > input/matrix.txt <<'DATA'
+A,0,0,1
+A,0,1,2
+A,1,0,3
+A,1,1,4
+B,0,0,5
+B,0,1,6
+B,1,0,7
+B,1,1,8
+DATA
+
+# Paste this entire command to create the Java source.
+cat > MatrixMultiply.java <<'JAVA'
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.*;
+import org.apache.hadoop.mapreduce.*;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+
+public class MatrixMultiply {
+    public static class M extends Mapper<LongWritable, Text, Text, Text> {
+        public void map(LongWritable key, Text value, Context c)
+                throws IOException, InterruptedException {
+            String[] p = value.toString().trim().split(",");
+            if (p.length != 4) return;
+            int i = Integer.parseInt(p[1]);
+            int j = Integer.parseInt(p[2]);
+            if (p[0].equals("A")) {
+                int cols = c.getConfiguration().getInt("b.cols", 2);
+                for (int k = 0; k < cols; k++)
+                    c.write(new Text(i + "," + k), new Text("A," + j + "," + p[3]));
+            } else if (p[0].equals("B")) {
+                int rows = c.getConfiguration().getInt("a.rows", 2);
+                for (int k = 0; k < rows; k++)
+                    c.write(new Text(k + "," + j), new Text("B," + i + "," + p[3]));
+            }
+        }
+    }
+    public static class R extends Reducer<Text, Text, Text, LongWritable> {
+        public void reduce(Text key, Iterable<Text> values, Context c)
+                throws IOException, InterruptedException {
+            Map<Integer, Long> a = new HashMap<>(), b = new HashMap<>();
+            for (Text v : values) {
+                String[] p = v.toString().split(",");
+                int k = Integer.parseInt(p[1]);
+                long n = Long.parseLong(p[2]);
+                (p[0].equals("A") ? a : b).merge(k, n, Long::sum);
+            }
+            long sum = 0;
+            for (int k : a.keySet()) sum += a.get(k) * b.getOrDefault(k, 0L);
+            c.write(key, new LongWritable(sum));
+        }
+    }
+    public static void main(String[] args) throws Exception {
+        Configuration conf = new Configuration();
+        conf.set("fs.defaultFS", "file:///");
+        conf.set("mapreduce.framework.name", "local");
+        conf.setInt("a.rows", Integer.parseInt(args[2]));
+        conf.setInt("b.cols", Integer.parseInt(args[3]));
+        Job job = Job.getInstance(conf, "Matrix multiplication");
+        job.setJarByClass(MatrixMultiply.class);
+        job.setMapperClass(M.class);
+        job.setReducerClass(R.class);
+        job.setMapOutputKeyClass(Text.class);
+        job.setMapOutputValueClass(Text.class);
+        job.setOutputKeyClass(Text.class);
+        job.setOutputValueClass(LongWritable.class);
+        job.setNumReduceTasks(1);
+        FileInputFormat.addInputPath(job, new Path(args[0]));
+        FileOutputFormat.setOutputPath(job, new Path(args[1]));
+        System.exit(job.waitForCompletion(true) ? 0 : 1);
+    }
+}
+JAVA
+
+# Compile and run.
+mkdir -p classes
+javac -cp "$(hadoop classpath)" -d classes MatrixMultiply.java
+jar cf matrix.jar -C classes .
+rm -rf output
+hadoop jar matrix.jar MatrixMultiply input output 2 2
+cat output/part-r-*
+
+Expected output:
+0,0    19
+0,1    22
+1,0    43
+1,1    50
+
+The final two arguments are the number of rows in A and columns in B.
+A's column count must equal B's row count. Include all matrix entries,
+including zeros, for complete output. Mapper groups contributions by
+output cell; reducer computes the dot product.
+
+QUESTION 4 — MOVIELENS: TAGS ASSOCIATED WITH EACH MOVIE
+-------------------------------------------------------
+cd ~/bigdata-lab
+mkdir -p q4
+cd q4
+
+# Download real MovieLens data from GroupLens (internet required).
+curl -fL https://files.grouplens.org/datasets/movielens/ml-latest-small.zip -o ml-latest-small.zip
+unzip -o ml-latest-small.zip
+
+# Java reads the original CSV files directly; no preprocessing required.
+
+cat > MovieTags.java <<'JAVA'
+import java.io.IOException;
+import java.util.*;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.*;
+import org.apache.hadoop.mapreduce.*;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.input.FileSplit;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+
+public class MovieTags {
+    // Parse CSV fields, including quoted commas and escaped quotes.
+    static List<String> csv(String line) {
+        List<String> fields = new ArrayList<>();
+        StringBuilder s = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (ch == '"') {
+                if (quoted && i + 1 < line.length() && line.charAt(i+1) == '"') {
+                    s.append('"'); i++;
+                } else quoted = !quoted;
+            } else if (ch == ',' && !quoted) {
+                fields.add(s.toString()); s.setLength(0);
+            } else s.append(ch);
+        }
+        fields.add(s.toString());
+        return fields;
+    }
+    public static class M extends Mapper<LongWritable, Text, Text, Text> {
+        public void map(LongWritable key, Text value, Context c)
+                throws IOException, InterruptedException {
+            List<String> p = csv(value.toString());
+            String file = ((FileSplit)c.getInputSplit()).getPath().getName();
+            if (file.equals("movies.csv") && p.size() >= 3 && !p.get(0).equals("movieId"))
+                c.write(new Text(p.get(0)), new Text("M" + p.get(1)));
+            else if (file.equals("tags.csv") && p.size() >= 4 && !p.get(0).equals("userId"))
+                c.write(new Text(p.get(1)), new Text("T" + p.get(2)));
+        }
+    }
+    public static class R extends Reducer<Text, Text, Text, Text> {
+        public void reduce(Text key, Iterable<Text> values, Context c)
+                throws IOException, InterruptedException {
+            String title = key.toString();
+            Set<String> tags = new TreeSet<>();
+            for (Text v : values) {
+                String s = v.toString();
+                if (s.startsWith("M")) title = s.substring(1);
+                else if (s.startsWith("T")) tags.add(s.substring(1));
+            }
+            if (!tags.isEmpty())
+                c.write(new Text(key + " | " + title), new Text(String.join(", ", tags)));
+        }
+    }
+    public static void main(String[] args) throws Exception {
+        Configuration conf = new Configuration();
+        conf.set("fs.defaultFS", "file:///");
+        conf.set("mapreduce.framework.name", "local");
+        Job job = Job.getInstance(conf, "Movie tags");
+        job.setJarByClass(MovieTags.class);
+        job.setMapperClass(M.class);
+        job.setReducerClass(R.class);
+        job.setOutputKeyClass(Text.class);
+        job.setOutputValueClass(Text.class);
+        job.setNumReduceTasks(1);
+        FileInputFormat.addInputPath(job, new Path(args[0]));
+        FileInputFormat.addInputPath(job, new Path(args[1]));
+        FileOutputFormat.setOutputPath(job, new Path(args[2]));
+        System.exit(job.waitForCompletion(true) ? 0 : 1);
+    }
+}
+JAVA
+
+mkdir -p classes
+javac -cp "$(hadoop classpath)" -d classes MovieTags.java
+jar cf movies.jar -C classes .
+rm -rf output
+hadoop jar movies.jar MovieTags ml-latest-small/movies.csv ml-latest-small/tags.csv output
+head -n 20 output/part-r-00000
+
+Output format (illustrative):
+movieId | Movie Title    tag1, tag2, tag3
+
+The mapper emits movie titles and tags keyed by movie ID. The reducer
+joins them and removes duplicate tags. Only movies with tags are shown.
+The actual tags depend on the downloaded dataset.
+
+NOTES
+-----
+These commands use local MapReduce, not HDFS. If your examiner requires
+HDFS, the filesystem and framework settings must be changed and inputs
+uploaded to HDFS. No Spark or Python is required for these three questions.
+The Java code and commands have not been executed on a Mac M4 here.
+
+
+BIG DATA LAB — MAC M4 / macOS Zsh
+Questions 6, 11, 13, 14, 15, 16, 21
+All Python implementations use PySpark. Run in local mode; Hadoop is not required.
+
+SETUP (once)
+mkdir -p ~/bigdata-lab
+cd ~/bigdata-lab
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install numpy scipy pandas
+export PYSPARK_PYTHON="$PWD/.venv/bin/python"
+export SPARK_LOCAL_IP=127.0.0.1
+java -version
+spark-submit --version
+# Use a Python version supported by your installed Spark. Java 17 is a good choice for Spark 3.5/4.x.
+# If needed: export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+# Save each code section in the filename indicated (nano filename, paste, Ctrl+O, Enter, Ctrl+X).
+
+DOWNLOAD REAL DATASETS (once, internet required)
+curl -fL https://archive.ics.uci.edu/ml/machine-learning-databases/iris/iris.data -o iris.csv
+curl -fL https://archive.ics.uci.edu/static/public/228/sms+spam+collection.zip -o sms.zip
+unzip -o sms.zip
+curl -fL https://raw.githubusercontent.com/scikit-learn/scikit-learn/main/sklearn/datasets/data/digits.csv.gz -o digits.csv.gz
+# Digits: 64 pixel values (0–16), followed by digit label; Spark reads gzip directly.
+# Real weather data: NOAA GHCN daily observations for New York Central Park, 2023.
+curl -fL https://www.ncei.noaa.gov/pub/data/ghcn/daily/by_station/USW00094728.csv.gz -o weather.csv.gz
+
+6. MAXIMUM TEMPERATURE USING SPARK JAVA
+File: MaxTemperature.java
+----------------------------------------
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("MaximumTemperature").getOrCreate()
+
+# Dummy data (City, Temperature)
+data = [
+    ("Kozhikode", 32),
+    ("Kochi", 34),
+    ("Delhi", 40),
+    ("Mumbai", 35),
+    ("Chennai", 38)
+]
+
+rdd = spark.sparkContext.parallelize(data)
+
+max_temp = rdd.map(lambda x: x[1]).max()
+
+print("Maximum temperature:", max_temp, "C")
+
+spark.stop()
+----------------------------------------
+Commands:
+# If SPARK_HOME is not set and Spark was installed using Homebrew:
+export SPARK_HOME="${SPARK_HOME:-$(brew --prefix apache-spark)/libexec}"
+mkdir -p classes
+javac -cp "$SPARK_HOME/jars/*" -d classes MaxTemperature.java
+jar cf max-temperature.jar -C classes .
+spark-submit --master 'local[*]' --class MaxTemperature max-temperature.jar weather.csv.gz
+# NOAA values are tenths of a degree Celsius; only quality-unflagged TMAX observations are used.
+
+11. CLUSTERING USING SPARK (K-MEANS AND BISECTING K-MEANS)
+File: clustering.py
+----------------------------------------
+from pyspark.sql import SparkSession
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.clustering import KMeans, BisectingKMeans
+from pyspark.ml.evaluation import ClusteringEvaluator
+spark = SparkSession.builder.appName('Clustering').getOrCreate()
+df = spark.read.csv('iris.csv', inferSchema=True).dropna()
+data = VectorAssembler(inputCols=['_c0','_c1','_c2','_c3'], outputCol='features').transform(df)
+for algorithm in [KMeans(k=3, seed=42), BisectingKMeans(k=3, seed=42)]:
+    model = algorithm.fit(data)
+    pred = model.transform(data)
+    print(type(algorithm).__name__, 'Silhouette:', ClusteringEvaluator().evaluate(pred))
+    print('Centers:', model.clusterCenters())
+    pred.groupBy('prediction').count().show()
+spark.stop()
+----------------------------------------
+spark-submit --master 'local[*]' clustering.py
+
+13. BAYES THEOREM — TWO CLASS IRIS CLASSIFICATION
+File: iris_bayes.py
+----------------------------------------
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import when, col
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.classification import NaiveBayes
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+spark = SparkSession.builder.appName('IrisBayes').getOrCreate()
+df = spark.read.csv('iris.csv', inferSchema=True).dropna()
+df = df.filter(col('_c4').isin('Iris-setosa','Iris-versicolor'))
+df = df.withColumn('label', when(col('_c4')=='Iris-setosa',0.0).otherwise(1.0))
+data = VectorAssembler(inputCols=['_c0','_c1','_c2','_c3'], outputCol='features').transform(df)
+train,test = data.randomSplit([0.8,0.2],seed=42)
+model = NaiveBayes(modelType='gaussian').fit(train)
+pred = model.transform(test)
+pred.select('label','probability','prediction').show(truncate=False)
+print('Accuracy:', MulticlassClassificationEvaluator(metricName='accuracy').evaluate(pred))
+spark.stop()
+----------------------------------------
+spark-submit --master 'local[*]' iris_bayes.py
+
+14. SMS SPAM CLASSIFICATION USING NAIVE BAYES
+File: sms_bayes.py
+----------------------------------------
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import Tokenizer, HashingTF
+from pyspark.ml.classification import NaiveBayes
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+spark = SparkSession.builder.appName('SMSBayes').getOrCreate()
+df = spark.read.option('sep','\t').option('quote','').csv('SMSSpamCollection').toDF('category','text').dropna()
+df = df.withColumn('label',when(col('category')=='spam',1.0).otherwise(0.0))
+train,test = df.randomSplit([0.8,0.2],seed=42)
+pipeline = Pipeline(stages=[Tokenizer(inputCol='text',outputCol='words'),HashingTF(inputCol='words',outputCol='features',numFeatures=4096),NaiveBayes(modelType='multinomial')])
+pred = pipeline.fit(train).transform(test)
+pred.select('category','prediction','probability').show(10,False)
+print('Accuracy:',MulticlassClassificationEvaluator(metricName='accuracy').evaluate(pred))
+spark.stop()
+----------------------------------------
+spark-submit --master 'local[*]' sms_bayes.py
+
+15. COMPARE GAUSSIAN AND BERNOULLI NAIVE BAYES ON IMAGES
+File: compare_bayes.py
+----------------------------------------
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+from pyspark.ml.feature import VectorAssembler, Binarizer
+from pyspark.ml.classification import NaiveBayes
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+spark = SparkSession.builder.appName('CompareBayes').getOrCreate()
+df = spark.read.csv('digits.csv.gz',inferSchema=True).dropna().withColumn('label',col('_c64').cast('double'))
+data = VectorAssembler(inputCols=['_c'+str(i) for i in range(64)],outputCol='features').transform(df)
+train,test = data.randomSplit([0.8,0.2],seed=42)
+bin = Binarizer(threshold=8.0,inputCol='features',outputCol='binary')
+for kind,feature,tr,te in [('gaussian','features',train,test),('bernoulli','binary',bin.transform(train),bin.transform(test))]:
+    pred = NaiveBayes(modelType=kind,featuresCol=feature).fit(tr).transform(te)
+    print(kind,'Accuracy:',MulticlassClassificationEvaluator(metricName='accuracy').evaluate(pred))
+spark.stop()
+----------------------------------------
+spark-submit --master 'local[*]' compare_bayes.py
+# Both models use the same train/test split. Bernoulli requires binary features.
+
+16. MULTICLASS BAYES CLASSIFICATION ON IMAGES
+File: multiclass_bayes.py
+----------------------------------------
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.classification import NaiveBayes
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+spark = SparkSession.builder.appName('MulticlassBayes').getOrCreate()
+df = spark.read.csv('digits.csv.gz',inferSchema=True).dropna().withColumn('label',col('_c64').cast('double'))
+data = VectorAssembler(inputCols=['_c'+str(i) for i in range(64)],outputCol='features').transform(df)
+train,test = data.randomSplit([0.8,0.2],seed=42)
+pred = NaiveBayes(modelType='multinomial').fit(train).transform(test)
+pred.select('label','prediction','probability').show(10,False)
+pred.groupBy('label','prediction').count().orderBy('label','prediction').show(100)
+print('Accuracy:',MulticlassClassificationEvaluator(metricName='accuracy').evaluate(pred))
+spark.stop()
+----------------------------------------
+spark-submit --master 'local[*]' multiclass_bayes.py
+
+21. K-NEAREST NEIGHBOUR ON HANDWRITTEN DIGITS
+File: knn.py
+----------------------------------------
+from pyspark.sql import SparkSession, Window
+from pyspark.sql import functions as F
+spark = SparkSession.builder.appName('KNN').getOrCreate()
+df = spark.read.csv('digits.csv.gz',inferSchema=True).dropna()
+data = df.select(F.array(*[F.col('_c'+str(i)).cast('double') for i in range(64)]).alias('pixels'),F.col('_c64').cast('double').alias('label'))
+train,test = data.randomSplit([0.8,0.2],seed=42)
+a = test.withColumn('id',F.monotonically_increasing_id()).cache()
+a.count()
+b = train.select(F.col('pixels').alias('train_pixels'),F.col('label').alias('neighbor_label')).withColumn('train_id',F.monotonically_increasing_id()).cache()
+b.count()
+pairs = a.crossJoin(F.broadcast(b)).withColumn('distance',F.expr('aggregate(zip_with(pixels, train_pixels, (x,y) -> (x-y)*(x-y)), 0D, (s,v) -> s+v)'))
+w = Window.partitionBy('id').orderBy('distance','train_id')
+nearest = pairs.withColumn('rank',F.row_number().over(w)).filter('rank <= 5')
+votes = nearest.groupBy('id','label','neighbor_label').agg(F.count('*').alias('votes'),F.sum('distance').alias('total_distance'))
+w2 = Window.partitionBy('id').orderBy(F.desc('votes'),'total_distance','neighbor_label')
+pred = votes.withColumn('rank',F.row_number().over(w2)).filter('rank = 1').select('label',F.col('neighbor_label').alias('prediction')).cache()
+pred.show(20)
+print('Accuracy:',pred.select(F.avg((F.col('label')==F.col('prediction')).cast('double'))).first()[0])
+spark.stop()
+----------------------------------------
+spark-submit --master 'local[*]' -i knn.scala
+# Spark ML has no built-in exact KNN classifier. This uses Spark SQL cross join, squared Euclidean distance and majority voting. K=5.
+
+SCALA OPTION
+The following sections provide Scala versions of questions 11, 13, 14, 15, 16, 21 and a Scala equivalent of question 6. Run each numbered section separately in spark-shell using :load, or paste into the shell. Start from ~/bigdata-lab after downloading the datasets.
+
+Scala common imports (paste in each fresh spark-shell):
+import org.apache.spark.sql.functions._
+import org.apache.spark.ml.feature._
+import org.apache.spark.ml.classification.NaiveBayes
+import org.apache.spark.ml.evaluation._
+import org.apache.spark.ml.clustering._
+import org.apache.spark.ml.Pipeline
+// Start: spark-shell --master 'local[*]' -i program.scala
+// Exit: :quit
+
+Scala 6 (alternative only; Java above is the required answer)
+spark.read.csv("weather.csv.gz").filter(col("_c1").startsWith("2023") && col("_c2")==="TMAX" && col("_c5").isNull && (col("_c3").cast("int") =!= -9999)).agg(max(col("_c3").cast("double")/10)).show()
+
+Scala 11
+val iris = spark.read.option("inferSchema",true).csv("iris.csv").na.drop()
+val data = new VectorAssembler().setInputCols(Array("_c0","_c1","_c2","_c3")).setOutputCol("features").transform(iris)
+val p1 = new KMeans().setK(3).setSeed(42).fit(data).transform(data)
+val p2 = new BisectingKMeans().setK(3).setSeed(42).fit(data).transform(data)
+println(new ClusteringEvaluator().evaluate(p1))
+println(new ClusteringEvaluator().evaluate(p2))
+p1.groupBy("prediction").count().show()
+p2.groupBy("prediction").count().show()
+
+Scala 13
+val iris = spark.read.option("inferSchema",true).csv("iris.csv").na.drop().filter(col("_c4").isin("Iris-setosa","Iris-versicolor")).withColumn("label",when(col("_c4")==="Iris-setosa",0.0).otherwise(1.0))
+val data = new VectorAssembler().setInputCols(Array("_c0","_c1","_c2","_c3")).setOutputCol("features").transform(iris)
+val Array(train,test) = data.randomSplit(Array(0.8,0.2),42)
+val pred = new NaiveBayes().setModelType("gaussian").fit(train).transform(test)
+pred.select("label","prediction","probability").show(false)
+println(new MulticlassClassificationEvaluator().setMetricName("accuracy").evaluate(pred))
+
+Scala 14
+val df = spark.read.option("sep","\t").option("quote","").csv("SMSSpamCollection").toDF("category","text").na.drop().withColumn("label",when(col("category")==="spam",1.0).otherwise(0.0))
+val Array(train,test) = df.randomSplit(Array(0.8,0.2),42)
+val tok = new Tokenizer().setInputCol("text").setOutputCol("words")
+val tf = new HashingTF().setInputCol("words").setOutputCol("features").setNumFeatures(4096)
+val nb = new NaiveBayes().setModelType("multinomial")
+val pred = new Pipeline().setStages(Array(tok,tf,nb)).fit(train).transform(test)
+pred.select("category","prediction").show()
+println(new MulticlassClassificationEvaluator().setMetricName("accuracy").evaluate(pred))
+
+Scala 15 and 16 (common data preparation, run in fresh shell)
+val df = spark.read.option("inferSchema",true).csv("digits.csv.gz").na.drop().withColumn("label",col("_c64").cast("double"))
+val data = new VectorAssembler().setInputCols((0 until 64).map(i=>s"_c$i").toArray).setOutputCol("features").transform(df)
+val Array(train,test) = data.randomSplit(Array(0.8,0.2),42)
+val ev = new MulticlassClassificationEvaluator().setMetricName("accuracy")
+// 15
+val bin = new Binarizer().setThreshold(8.0).setInputCol("features").setOutputCol("binary")
+val g = new NaiveBayes().setModelType("gaussian").fit(train).transform(test)
+val b = new NaiveBayes().setModelType("bernoulli").setFeaturesCol("binary").fit(bin.transform(train)).transform(bin.transform(test))
+println("Gaussian: "+ev.evaluate(g))
+println("Bernoulli: "+ev.evaluate(b))
+// 16
+val pred = new NaiveBayes().setModelType("multinomial").fit(train).transform(test)
+pred.select("label","prediction","probability").show(false)
+println(ev.evaluate(pred))
+
+Scala 21
+import org.apache.spark.sql.expressions.Window
+val df = spark.read.option("inferSchema",true).csv("digits.csv.gz").na.drop()
+val data = df.select(array((0 until 64).map(i=>col(s"_c$i").cast("double")):_*).alias("pixels"),col("_c64").cast("double").alias("label"))
+val Array(train,test) = data.randomSplit(Array(0.8,0.2),42)
+val a = test.withColumn("id",monotonically_increasing_id()).cache()
+a.count()
+val b = train.select(col("pixels").alias("train_pixels"),col("label").alias("neighbor_label")).withColumn("train_id",monotonically_increasing_id()).cache()
+b.count()
+val pairs = a.crossJoin(broadcast(b)).withColumn("distance",expr("aggregate(zip_with(pixels, train_pixels, (x,y) -> (x-y)*(x-y)), 0D, (s,v) -> s+v)"))
+val w = Window.partitionBy("id").orderBy("distance","train_id")
+val nearest = pairs.withColumn("rank",row_number().over(w)).filter("rank <= 5")
+val votes = nearest.groupBy("id","label","neighbor_label").agg(count("*").alias("votes"),sum("distance").alias("total_distance"))
+val w2 = Window.partitionBy("id").orderBy(desc("votes"),col("total_distance"),col("neighbor_label"))
+val pred = votes.withColumn("rank",row_number().over(w2)).filter("rank = 1").select(col("label"),col("neighbor_label").alias("prediction"))
+pred.show()
+pred.select(avg((col("label")===col("prediction")).cast("double")).alias("accuracy")).show()
+
+NOTES
+Requires Spark 3.5+ (or compatible newer Spark). Dataset URLs and programs have not been live-tested in this environment. Download datasets and test before the exam. If Spark reports Python dependency errors, check that PYSPARK_PYTHON points to the activated environment. No standalone scikit-learn classifier is used; its public repository is only a source of the digits dataset.
